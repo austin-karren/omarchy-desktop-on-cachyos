@@ -13,14 +13,14 @@ Stow alone does not survive that. `stow` installs symlinks once; it has no
 opinion about what happens to them afterwards, and nothing notices when the
 answer is "Omarchy replaced them".
 
-So the repo carries a small CLI — `rice` — that dispatches to `rice-*` scripts
+So the repo carries a small CLI — `loaf` — that dispatches to `loaf-*` scripts
 the same way `omarchy` dispatches to `omarchy-*`, including the
-`# rice:summary=` convention so `rice` with no arguments lists what exists.
+`# loaf:summary=` convention so `loaf` with no arguments lists what exists.
 Two commands matter:
 
-- **`rice doctor`** asserts the invariants of all three layers and changes
+- **`loaf doctor`** asserts the invariants of all three layers and changes
   nothing. Read-only by construction: no writes, no sudo, no network.
-- **`rice heal`** re-asserts the rice on top of a base that moved, and applies
+- **`loaf heal`** re-asserts the rice on top of a base that moved, and applies
   pending migrations. Wired into `~/.config/omarchy/hooks/post-update.d`, so it
   runs after every `omarchy update` without being remembered.
 
@@ -52,7 +52,7 @@ being stowed, but a change to something *outside* the repo — a stale symlink i
 a script that runs once and records that it did.
 
 Each migration is named for the epoch second it was written, must be idempotent,
-and is recorded in `~/.local/state/rice/applied` after it succeeds. A failed
+and is recorded in `~/.local/state/loaf/applied` after it succeeds. A failed
 migration is not recorded, so it retries.
 
 ## Checking the base, not just ourselves
@@ -81,8 +81,8 @@ Migrations settle it: a migration is a statement about a specific change in this
 repo, so separate repos would let the ledger and the thing it reconciles sit at
 different versions.
 
-This would flip if `rice` were ever meant for someone else's machine, which needs
-its own version and release cadence. The scripts read `RICE_ROOT` from the
+This would flip if `loaf` were ever meant for someone else's machine, which needs
+its own version and release cadence. The scripts read `LOAF_ROOT` from the
 environment rather than hard-wiring a path, so that extraction stays cheap.
 
 ## Consequences
