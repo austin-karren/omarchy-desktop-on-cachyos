@@ -97,3 +97,44 @@ inventory and the bar pixel references. `~/snapshots/pre-omarchy-update-*` holds
 machine-side config and the bridge patch as a diff, and
 `@home-pre-quattro-*` / `@-pre-quattro-*` are read-only btrfs snapshots at the
 filesystem top level. Re-verify against a new version and tag again before trusting it.
+
+## Addendum: measured requirements, 2026-08-08
+
+Established against a `git worktree` of `origin/quattro` at `~/quattro-lab/omarchy`,
+without moving this machine's checkout.
+
+**Hyprland does not need upgrading.** 0.56.2 already carries the whole `hl.*` Lua API —
+`hl.bind`, `hl.config`, `hl.dispatch`, `hl.dsp.exec_cmd`, `hl.animation`, `hl.device` are
+all in the binary. It registers them only when a Lua config is loaded:
+
+    [cfg] Config is lua, loading lua mgr
+    [cfg] Config is NOT lua, loading regular mgr
+
+`hyprctl dispatch 'hl.dsp.exec_cmd("true")'` returns *Invalid dispatcher* on this machine
+purely because the session was started from `hyprland.conf`. The rewrite to `.lua` is what
+turns the API on; it is not gated on a newer compositor. An earlier reading of that error
+as a version blocker was wrong.
+
+**Quickshell must come from the AUR, not CachyOS.** `omarchy-restart-shell` says so
+directly: *"Requires our quickshell-git build; 0.3.0's kill returns immediately."* Its
+restart loop relies on `quickshell kill` blocking until the process is gone.
+`cachyos-extra-znver4` ships `quickshell 0.3.0-2.1`; quattro's own package list asks for
+`quickshell-git`. This is the one place the CachyOS base cannot supply what quattro needs.
+
+**Nineteen packages are missing**, of which most are ordinary (`ddcutil`, `dua-cli`,
+`expac`, `foot`, `inotify-tools`, `udiskie`, `xournalpp`, `mpv-mpris`, `bluez-tools`) and
+four are Omarchy's own from the `[omarchy]` repo (`omacalc`, `omacut`, `omawrite`,
+`tensaku`). The `[omarchy]` repo ships neither Hyprland nor Quickshell.
+
+**Five of the nine bridge patches target files that no longer exist** on quattro:
+`install.sh`, `install/config/hardware/{network,nvidia}.sh`,
+`install/config/omarchy-ai-skill.sh`, `install/config/walker-elephant.sh`,
+`install/preflight/all.sh`. The walker one is likely moot anyway — quattro has its own
+launcher and does not use Walker. This machine is **5,913 commits** behind quattro.
+
+**There is no upgrade path, confirmed by absence.** Not one of quattro's 62 migrations
+mentions waybar. Six create `shell.json` or quickshell state, but they migrate *between*
+quattro versions and assume the shell already exists. The shell is set up by the
+installer. Converting a 3.x machine in place is therefore a desktop-layer reinstall over
+a live system, not an update — which is why the chosen approach is to build a fresh
+quattro elsewhere, port the rice onto it, and cut over.
