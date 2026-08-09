@@ -130,11 +130,71 @@ The installer is running. Attach to it with:
     lab/quattro-vm view
 
 Install CachyOS normally — this is step 1 of ADR-0035, and doing it by hand is
-the point. Use btrfs so the base matches the real machine's subvolume layout.
+the point. The settings that matter, because they are what make this base match
+the real machine rather than merely resemble it:
+
+    Bootloader   Limine (the default)
+    Partitions   Erase disk, btrfs
+    ESP          /boot, not /boot/efi
+    Desktop      No Desktop — Omarchy supplies it
 
 When the base is installed and booted, snapshot it before layering anything:
 
     lab/quattro-vm snapshot
+
+If you drive the installer headlessly rather than clicking it yourself, launch
+Calamares with a UTF-8 locale — see 'quattro-vm calamares'.
+EOF
+}
+
+cmd_calamares() {
+  # Calamares' pacstrap module decodes pacman's output with the ASCII codec when
+  # the environment has no UTF-8 locale, so the first non-ASCII byte pacman emits
+  # kills the install with "Boost.Python error in job \"pacstrap\"" — which names
+  # neither the locale nor the real error. A desktop-launched Calamares inherits
+  # the session's UTF-8 locale and never hits it; one launched over SSH inherits
+  # LANG= and LC_CTYPE=POSIX, and always does.
+  #
+  # Print rather than run: this executes inside the guest, not here.
+  cat <<'EOF'
+Run this INSIDE the guest, not on the host:
+
+    export XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-0
+    sudo -E env LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8 calamares
+
+Notes for driving it without a human:
+
+  * Use Calamares' keyboard mnemonics — Alt+N is Next. They are deterministic.
+  * ydotool's --absolute lands at 0,0: ydotoold exposes a *relative* pointer, and
+    libinput accelerates large deltas, so a single big move overshoots wildly.
+    Move in ~4px steps with a pause between them to get 1:1.
+  * The live ISO's own text installer is a dead end. Its UEFI-mountpoint radio
+    group takes neither keyboard nor synthetic mouse input, so /boot is
+    unreachable there and it forces /boot/efi.
+EOF
+}
+
+cmd_recover() {
+  # Two things reliably wedge a retry after a failed install, and neither error
+  # message points at the cause.
+  cat <<'EOF'
+A failed install leaves two traps:
+
+1. "Device or resource busy" on wipefs / btrfs device scan --forget.
+   The live kernel keeps the btrfs signature registered even with nothing
+   mounted, and killing Calamares does not release it. Only a reboot does —
+   which is exactly what the installer's own message says. sgdisk --zap-all
+   still writes; it just cannot tell the running kernel, so the disk comes back
+   clean after the reboot.
+
+2. "No bootable option or device was found" on the next boot.
+   virt-install ejects the install media when its install phase ends, and the
+   UEFI NVRAM keeps stale entries. Put the ISO back and boot it again:
+
+       virsh -c qemu:///system change-media <domain> sda <iso> --insert --live --config
+       virsh -c qemu:///system destroy <domain> && virsh -c qemu:///system start <domain>
+
+   The domain also needs <boot dev='cdrom'/> ahead of <boot dev='hd'/>.
 EOF
 }
 
@@ -177,15 +237,19 @@ case "${1:-}" in
   snapshot) cmd_snapshot ;;
   reset) cmd_reset ;;
   destroy) cmd_destroy ;;
+  calamares) cmd_calamares ;;
+  recover) cmd_recover ;;
   *)
     cat >&2 <<EOF
-Usage: quattro-vm {create|view|snapshot|reset|destroy}
+Usage: quattro-vm {create|view|snapshot|reset|destroy|calamares|recover}
 
-  create    fetch and verify the CachyOS ISO, define '$NAME', boot the installer
-  view      attach virt-viewer to the console
-  snapshot  save the clean base as '$BASE_SNAPSHOT'
-  reset     revert to that snapshot
-  destroy   undefine the domain and delete its disk
+  create     fetch and verify the CachyOS ISO, define '$NAME', boot the installer
+  view       attach virt-viewer to the console
+  snapshot   save the clean base as '$BASE_SNAPSHOT'
+  reset      revert to that snapshot
+  destroy    undefine the domain and delete its disk
+  calamares  how to launch the installer headlessly without it dying on locale
+  recover    what to do after a failed install wedges the disk or the boot order
 EOF
     exit 1
     ;;

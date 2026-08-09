@@ -115,6 +115,49 @@ is a guest that boots to a working desktop with no IP. That reads as a broken VM
 `quattro-vm create` now refuses to run until three virbr0-scoped rules exist, and
 prints them. It grants the bridge and nothing wider.
 
+## What the first real install established, 2026-08-08
+
+The base is built and snapshotted as `base-cachyos`. It is CachyOS by every
+measure that matters here: `[cachyos-znver4]`, `[cachyos-core-znver4]` and
+`[cachyos-extra-znver4]` sit above `core`/`extra` in `/etc/pacman.conf`,
+`linux-cachyos 7.1.6-1` is the running kernel, and Limine 12.5.2 ships with
+`limine-snapper-sync` and `snapper`. Root is `/dev/vda2[/@]` btrfs with
+`@ @home @root @srv @cache @tmp @log`, and the ESP is `/dev/vda1` vfat at
+**`/boot`** — not `/boot/efi` — which is what the real machine has, down to
+`/boot` being unreadable to a non-root user.
+
+The znver4 repos are the proof that `--cpu host-passthrough` is load-bearing
+rather than decorative. They would not be selected on an emulated CPU model.
+
+Four findings that the install path has to carry:
+
+**Calamares dies on the locale when driven headlessly.** Its `pacstrap` module
+decodes pacman's output with the ASCII codec, so the first non-ASCII byte pacman
+emits raises `UnicodeDecodeError` and Calamares reports
+`Boost.Python error in job "pacstrap"` — naming neither the locale nor the real
+error. A desktop-launched Calamares inherits the session's UTF-8 locale and never
+sees it; one launched over SSH inherits `LANG=` and `LC_CTYPE=POSIX` and always
+does. The fix is `LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8`.
+
+**The live ISO's text installer cannot express this layout.** Its UEFI-mountpoint
+radio group accepts neither keyboard nor synthetic mouse input, so `/boot` is
+unreachable and it forces `/boot/efi`. It is also the component that silently
+produced a plan with root and boot on the same partition as ext4. Calamares set
+`/boot` and btrfs without argument. Do not retry the TUI.
+
+**A failed install wedges the disk until a reboot.** The live kernel keeps the
+btrfs signature on the root partition registered even with nothing mounted;
+`wipefs`, `btrfs device scan --forget` and killing Calamares all return
+`Device or resource busy`. `sgdisk --zap-all` still writes — it just cannot
+inform the running kernel — so the disk comes back clean afterwards.
+
+**CachyOS enables ufw in the installed system.** Fresh out of the installer,
+`ufw` is active and `firewalld` inactive, so nothing reaches the guest until a
+rule is added. Worth knowing before ADR-0016's remote access is layered on.
+
+`lab/quattro-vm calamares` and `lab/quattro-vm recover` print the first three, so
+they are recoverable from the tool rather than only from this document.
+
 ## Consequences
 
 - ADR-0001 stays `accepted` as the record of how *this* machine was built. It is
