@@ -184,3 +184,47 @@ carries the merged list's entry inventory (ADR-0027). Both are at tag
 
 This removes 12 of the 31 not-installed symlinks `loaf doctor` reports. The rest
 are the Port and Re-decide buckets and are still genuinely missing.
+
+## Addendum: the bar is ported, 2026-08-09
+
+The bar was called the cheap half, and it was. The layout, both custom modules
+and the fixed-dark treatment all landed in one sitting against a live session,
+with no restart of the shell and none of Hyprland.
+
+Three predictions in the table above need correcting:
+
+- **0031 weather is not "the one real regression".** Quattro's weather plugin
+  already keeps a stale reading rather than blanking, which was the whole point
+  of ADR-0031. The residual gap is only that the reading is in memory rather than
+  on disk, so it is missing for a few seconds after a shell restart. No plugin
+  clone was needed or written.
+- **0009 is not a "modest" port of the same mechanism.** The hook is gone
+  entirely. Quattro renders theme surfaces from templates, and user templates in
+  `~/.config/omarchy/themed/` outrank the built-ins, so pinning the bar is two
+  changed lines in a tracked `shell.toml.tpl`. Note also that the claim in an
+  earlier draft that `theme-set.d` no longer existed was wrong — it lives at
+  `~/.config/omarchy/hooks/theme-set.d/` and still fires, which is why the stale
+  `20-waybar-theme-override` had to be deleted rather than left.
+- **0013 ratio does not port "as a command module".** Command modules cannot be
+  hidden, and the better home turned out to be the centre's hover-reveal group.
+  It is a custom QML module binding to `bar.centerSectionRevealHeld`. The
+  command-module tier is still the right answer for `apexshot`, which is a static
+  glyph with three click actions.
+
+**`tailscale-icon` is retired, not ported.** `omarchy.tailscale` is first-party
+and does more — connection switcher, machine browser, copy actions. ADR-0029's
+argument about *where* it sits was about the question it answers, and that is
+unaffected by who implements it.
+
+**The one thing that bit.** Quickshell runs module commands through `bash -lc`,
+and a minimal login shell here has no `~/.local/bin` on `PATH`. A module whose
+`exec` cannot be found renders as an empty box with no error in any log. Absolute
+paths for anything in `.local/bin`, until `.config/uwsm/env` is re-decided —
+that file is what used to put `~/.local/bin` on the session path, and it also
+still points `OMARCHY_PATH` at the checkout that no longer exists.
+
+**Still outstanding on the bar:** the model-usage widget cannot be made to
+hover-reveal by configuration; it has no visibility setting and only the
+package's own `indicators/` directory feeds the hover group. Matching the ratio
+treatment would mean a second custom QML module that re-implements its chip and
+loses its popup, which is a real trade rather than an oversight.
