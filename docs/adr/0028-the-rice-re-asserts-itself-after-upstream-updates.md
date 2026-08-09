@@ -4,10 +4,11 @@ status: accepted
 
 # The rice re-asserts itself after upstream updates
 
-This machine is three layers deep. CachyOS is the base. Omarchy is the desktop,
-layered on with a third-party bridge repo rather than its own ISO (ADR-0001).
-The rice is everything this repo tracks, on top of both. The two lower layers
-update on their own schedule, and each can quietly undo the one above it.
+This machine is three layers deep. CachyOS is the base. Omarchy is the desktop —
+originally layered on with a third-party bridge repo (ADR-0001), distro packages
+at `/usr/share/omarchy` since quattro (ADR-0035). The rice is everything this
+repo tracks, on top of both. The two lower layers update on their own schedule,
+and each can quietly undo the one above it.
 
 Stow alone does not survive that. `stow` installs symlinks once; it has no
 opinion about what happens to them afterwards, and nothing notices when the
@@ -57,17 +58,23 @@ migration is not recorded, so it retries.
 
 ## Checking the base, not just ourselves
 
-The bridge's CachyOS adaptations are `sed`-ed directly into Omarchy's own tree
-and are **uncommitted there**, so `omarchy update`'s git pull can revert them.
-`doctor` therefore checks the adaptations themselves rather than counting dirty
-files — a dirty Omarchy tree is the expected state here, not a problem.
+As first written, this section described `doctor` watching the bridge's CachyOS
+adaptations — `sed`-ed into Omarchy's checkout, uncommitted, revertible by any
+`omarchy update` git pull. Under quattro there is no checkout and no bridge
+(ADR-0035), and every check built on them is deleted. What the base checks
+assert now is recorded in ADR-0034: the `[cachyos*]` repos, the mirrorlist, the
+wifi backend's existence, the kernel.
 
-The corollary is that a sentinel can outlive its reason. The bridge also patched
-`omarchy-update-restart` to swap `pacman -Q linux` for `linux-cachyos`; upstream
-has since rewritten that script to compare `/usr/lib/modules/*/vmlinuz` against
-`uname -r`, which is distro-agnostic and already correct. Asserting the old patch
-would fail forever on a machine that is fine. Checks get deleted when upstream
-makes them obsolete.
+The lesson the old section carried is the part that survives, because the
+quattro upgrade proved it twice. **A sentinel can outlive its reason** — the
+bridge patched `omarchy-update-restart`, upstream rewrote that script until the
+patch was obsolete, and asserting it would have failed forever on a healthy
+machine. Checks get deleted when upstream makes them obsolete. And the sharper
+converse, measured on this machine: **a sentinel can keep passing after its
+subject dies.** The `wifi backend` check went on reporting ✓ for hours after
+quattro uninstalled `iwd`, because it asserted the *setting* rather than the
+invariant — a green tick on a NetworkManager with no backend at all. An expired
+check is worse than a missing one; it reports health it cannot see.
 
 ## One repo, not two
 
