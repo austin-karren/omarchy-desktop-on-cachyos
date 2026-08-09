@@ -95,6 +95,26 @@ Step 3 is the open question, and it cannot be answered by reading — it needs a
 install to fail against. That is what the fresh-quattro-elsewhere build is for.
 This ADR stays `proposed` until one has actually been run.
 
+## The lab
+
+`lab/quattro-vm` builds it: a CachyOS VM this repo did not install, so the
+layering steps fail honestly rather than succeeding by accident on a machine that
+already has everything. `lab/` is repo-only and Stow-ignored.
+
+Two settings there are load-bearing rather than incidental. **`--cpu
+host-passthrough`**, because CachyOS's znver4 repos are gated on the CPU
+reporting Zen 4 feature flags — under an emulated model the guest quietly falls
+back to the generic repos and stops being the base under test. And **UEFI**,
+because the real machine boots Limine on UEFI and the installer takes a different
+path on BIOS.
+
+The guest also needs the host firewall opened, which is not obvious from the
+symptom: Omarchy enables ufw with a default-`DROP` `FORWARD` policy, libvirt's
+own rules live in a separate nft table that ufw's chains pre-empt, and the result
+is a guest that boots to a working desktop with no IP. That reads as a broken VM.
+`quattro-vm create` now refuses to run until three virbr0-scoped rules exist, and
+prints them. It grants the bridge and nothing wider.
+
 ## Consequences
 
 - ADR-0001 stays `accepted` as the record of how *this* machine was built. It is

@@ -1,0 +1,192 @@
+#!/bin/bash
+
+# Build the throwaway CachyOS VM that the quattro install path is developed
+# against (ADR-0035). The point is not to run a desktop in a window — it is to
+# have a base this repo did not install, so the layering steps fail honestly
+# instead of succeeding by accident on a machine that already has everything.
+#
+# Not part of the rice. `lab/` is repo-only, ignored by Stow, and nothing here
+# is ever symlinked into $HOME.
+#
+#   quattro-vm create    define the domain and boot the installer
+#   quattro-vm view      attach a viewer to the console
+#   quattro-vm snapshot  save the base before layering Omarchy onto it
+#   quattro-vm reset     roll back to that snapshot
+#   quattro-vm destroy   remove the domain and its disk
+
+set -euo pipefail
+
+NAME=${QUATTRO_VM_NAME:-shokupan-quattro-lab}
+ISO_DATE=${QUATTRO_VM_ISO_DATE:-260628}
+ISO_NAME="cachyos-desktop-linux-${ISO_DATE}.iso"
+ISO_URL="https://cdn77.cachyos.org/ISO/desktop/${ISO_DATE}/${ISO_NAME}"
+IMAGES=${QUATTRO_VM_IMAGES:-/var/lib/libvirt/images}
+ISO="$IMAGES/$ISO_NAME"
+DISK="$IMAGES/${NAME}.qcow2"
+DISK_SIZE=${QUATTRO_VM_DISK:-60}
+RAM=${QUATTRO_VM_RAM:-8192}
+VCPUS=${QUATTRO_VM_VCPUS:-4}
+BASE_SNAPSHOT=base-cachyos
+
+die() { printf '\e[31m%s\e[0m\n' "$1" >&2; exit 1; }
+step() { printf '\n\e[32m%s\e[0m\n' "$1"; }
+
+need() { command -v "$1" &>/dev/null || die "$1 is not installed. See ADR-0035."; }
+
+fetch_iso() {
+  # The .sha256 is fetched every run rather than pinned here, because pinning a
+  # hash in the repo and a date in a variable gives two things to forget to
+  # update together. Upstream's checksum is the authority; this only asserts
+  # that what landed on disk matches what upstream says it published.
+  if [[ ! -f $ISO ]]; then
+    step "Downloading $ISO_NAME (about 3.0 GiB)"
+    sudo curl -fL --retry 3 -C - -o "$ISO" "$ISO_URL"
+  fi
+
+  step "Verifying the ISO"
+  local want have
+  want=$(curl -fsSL "$ISO_URL.sha256" | awk '{print $1}')
+  [[ $want =~ ^[0-9a-f]{64}$ ]] || die "Upstream checksum did not look like a SHA-256: $want"
+  have=$(sudo sha256sum "$ISO" | awk '{print $1}')
+
+  if [[ $want != "$have" ]]; then
+    # Deliberately not deleting it. A mismatch is worth looking at — CachyOS
+    # mirrors have served soft-404 HTML with a 200 before now, and a truncated
+    # resume looks the same from here as a poisoned one.
+    die "Checksum mismatch.
+  upstream: $want
+  on disk:  $have
+Inspect $ISO before removing it."
+  fi
+  echo "ok — $have"
+}
+
+exists() { virsh -c qemu:///system dominfo "$NAME" &>/dev/null; }
+
+check_firewall() {
+  # Omarchy enables ufw with a default-DROP FORWARD policy, and libvirt's own
+  # rules live in a separate nft table that ufw's chains pre-empt. The guest
+  # then boots to a working desktop with no IP at all, which reads like a
+  # broken VM rather than a host firewall — so say so here instead.
+  command -v ufw &>/dev/null || return 0
+  sudo ufw status 2>/dev/null | grep -q '^Status: active' || return 0
+  sudo ufw status 2>/dev/null | grep -q 'on virbr0' && return 0
+
+  local wan
+  wan=$(ip route show default | awk '{print $5; exit}')
+
+  cat >&2 <<EOF
+
+ufw is active and has no rules for virbr0. The guest will get no DHCP lease.
+Grant it the bridge, and nothing wider:
+
+    sudo ufw allow in on virbr0 to any port 67 proto udp comment 'libvirt guest DHCP'
+    sudo ufw allow in on virbr0 to any port 53 comment 'libvirt guest DNS'
+    sudo ufw route allow in on virbr0 out on ${wan:-<wan-iface>} from 192.168.122.0/24 comment 'libvirt guest NAT egress'
+
+EOF
+  die "Firewall not configured for the guest network."
+}
+
+cmd_create() {
+  need virt-install
+  need virsh
+  check_firewall
+  exists && die "Domain '$NAME' already exists. 'quattro-vm destroy' first, or set QUATTRO_VM_NAME."
+
+  fetch_iso
+
+  step "Creating a ${DISK_SIZE}G disk"
+  sudo qemu-img create -f qcow2 "$DISK" "${DISK_SIZE}G"
+
+  step "Defining $NAME"
+  # host-passthrough is not a performance tweak here, it is the whole point:
+  # CachyOS's znver4 repos are gated on the CPU actually reporting Zen 4
+  # feature flags. Under the default emulated model the guest would silently
+  # fall back to the generic repos and stop being the base we are testing.
+  #
+  # UEFI likewise — the real machine boots Limine on UEFI, and the installer
+  # takes a different path on BIOS.
+  virt-install \
+    --connect qemu:///system \
+    --name "$NAME" \
+    --memory "$RAM" \
+    --vcpus "$VCPUS" \
+    --cpu host-passthrough \
+    --boot uefi \
+    --disk path="$DISK",format=qcow2,bus=virtio \
+    --cdrom "$ISO" \
+    --network network=default,model=virtio \
+    --graphics spice \
+    --video virtio \
+    --channel spicevmc \
+    --osinfo archlinux \
+    --noautoconsole
+
+  step "Done"
+  cat <<EOF
+The installer is running. Attach to it with:
+
+    lab/quattro-vm view
+
+Install CachyOS normally — this is step 1 of ADR-0035, and doing it by hand is
+the point. Use btrfs so the base matches the real machine's subvolume layout.
+
+When the base is installed and booted, snapshot it before layering anything:
+
+    lab/quattro-vm snapshot
+EOF
+}
+
+cmd_view() {
+  exists || die "No domain '$NAME'. Run 'quattro-vm create' first."
+  need virt-viewer
+  virt-viewer --connect qemu:///system "$NAME" &
+  echo "Viewer launched."
+}
+
+cmd_snapshot() {
+  exists || die "No domain '$NAME'."
+  step "Snapshotting the clean base as '$BASE_SNAPSHOT'"
+  # Every layering attempt is expected to fail at least once; without this the
+  # cost of a failed attempt is a full reinstall, and the temptation is then to
+  # patch forward rather than start clean.
+  virsh -c qemu:///system snapshot-create-as "$NAME" "$BASE_SNAPSHOT" \
+    "CachyOS installed, nothing layered on top" --atomic
+  echo "Roll back to it with 'quattro-vm reset'."
+}
+
+cmd_reset() {
+  exists || die "No domain '$NAME'."
+  step "Reverting to '$BASE_SNAPSHOT'"
+  virsh -c qemu:///system snapshot-revert "$NAME" "$BASE_SNAPSHOT"
+}
+
+cmd_destroy() {
+  exists || die "No domain '$NAME'."
+  step "Removing $NAME"
+  virsh -c qemu:///system destroy "$NAME" 2>/dev/null || true
+  virsh -c qemu:///system undefine "$NAME" --nvram --snapshots-metadata
+  sudo rm -f "$DISK"
+  echo "Gone. The ISO at $ISO is kept."
+}
+
+case "${1:-}" in
+  create) cmd_create ;;
+  view) cmd_view ;;
+  snapshot) cmd_snapshot ;;
+  reset) cmd_reset ;;
+  destroy) cmd_destroy ;;
+  *)
+    cat >&2 <<EOF
+Usage: quattro-vm {create|view|snapshot|reset|destroy}
+
+  create    fetch and verify the CachyOS ISO, define '$NAME', boot the installer
+  view      attach virt-viewer to the console
+  snapshot  save the clean base as '$BASE_SNAPSHOT'
+  reset     revert to that snapshot
+  destroy   undefine the domain and delete its disk
+EOF
+    exit 1
+    ;;
+esac
