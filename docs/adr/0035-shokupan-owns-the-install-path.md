@@ -158,6 +158,66 @@ rule is added. Worth knowing before ADR-0016's remote access is layered on.
 `lab/quattro-vm calamares` and `lab/quattro-vm recover` print the first three, so
 they are recoverable from the tool rather than only from this document.
 
+## Quattro layers onto CachyOS. It takes four patches, 2026-08-09
+
+Run end to end in the lab. The result is snapshotted as `quattro-layered`: Hyprland
+and quickshell running, quattro's bar and menus live, on `linux-cachyos 7.1.6-1`
+with every `[cachyos*]` repo intact. **The base survives.** That answers the
+question ADR-0034 left open.
+
+![Quattro running on the CachyOS base](../images/quattro-on-cachyos.png)
+
+The vehicle is `omarchy-upgrade-to-quattro`, not the installer — and it is far less
+hostile to the base than `install/post-install/pacman.sh`. Its `pacman.conf` edit is
+a surgical awk that replaces only the `[omarchy]` section and passes every other
+line through, so `[cachyos-znver4]` and friends are untouched.
+
+**The one root cause is the mirror, and everything else follows from it.**
+`configure_pacman_channel` overwrites `/etc/pacman.d/mirrorlist` with a single
+`Server = https://stable-mirror.omarchy.org/$repo/os/$arch`. That mirror is a
+*frozen* Arch snapshot: it served `gstreamer 1.28.5-2` while CachyOS had already
+installed `1.28.6-1`. Since CachyOS tracks Arch rolling, pinning core/extra to
+Omarchy's snapshot puts the two halves of the system into permanent version skew,
+and pacman refuses the resulting partial downgrades.
+
+That skew is what produced the aquamarine mess, which looked like an independent ABI
+problem and was not. Under the frozen mirror, `extra/hyprland 0.56.0-2` wanted
+`libaquamarine.so=12-64` while CachyOS's `aquamarine 0.14.0` provides `so=13`;
+pinning the Arch stack then broke `hyprtoolkit`, which wants `so=13`. Restoring the
+rolling mirrorlist collapses all of it — CachyOS's `aquamarine 0.14.0`,
+`hyprland 0.56.2-1` and `hyprtoolkit 0.5.4-4.1` are mutually consistent. **Do not
+pin the hypr stack.** Fix the mirror and the ABI conflict disappears.
+
+The four patches:
+
+| # | Patch | Why |
+|---|---|---|
+| 1 | Comment out the `mirrorlist` overwrite in `configure_pacman_channel` | Omarchy pins a frozen Arch snapshot; CachyOS is rolling. The root cause |
+| 2 | Reconcile once with `pacman -Syu` before re-running | The failed attempts leave a half-frozen, half-rolling system |
+| 3 | Remove the fish stack (`cachyos-fish-config fish fish-autopair fish-pure-prompt fisher`) | `cachyos-fish-config` requires `tealdeer`, which hard-conflicts with Omarchy's `tldr`. `chsh -s /bin/bash` **first** — it is the login shell |
+| 4 | Nothing for `tldr` | Patch 3 removes the conflict at its source, so bridge patch #2 is finally unnecessary |
+
+Patch 3 is the bridge's `tldr` concern resurfacing as a hard dependency conflict
+rather than a preference. Removing fish is the better fix than patching Omarchy's
+package list, because that list ships inside the `omarchy` package now and any
+edit to it is reverted by the next package upgrade.
+
+**Quattro guards pacman.** It installs a hook that refuses a direct `pacman -Syu`
+and demands `OMARCHY_ALLOW_DIRECT_PACMAN=1`. `~/.local/bin/system-update` calls
+`pacman -Syu` directly (ADR-0034) and will break the day this machine moves; it
+needs that variable or Omarchy's own updater.
+
+**Loose ends, recorded rather than resolved:**
+
+- The upgrade installed `omarchy-dev` / `omarchy-settings-dev 4.0.0` even on the
+  `stable` channel with no `--dev`. Not investigated.
+- `quickshell 0.3.0-2.1` from CachyOS is what ended up installed, and the shell runs.
+  ADR-0033 says quattro needs `quickshell-git` because `0.3.0`'s `kill` returns
+  immediately; the installed `omarchy-restart-shell` uses `pkill -x quickshell`, so
+  that claim may be stale. Worth rechecking before treating it as a constraint.
+- The lab has no display manager by default (No Desktop install), so `sddm` had to be
+  started by hand. On a base installed with Plasma this would not appear.
+
 ## Consequences
 
 - ADR-0001 stays `accepted` as the record of how *this* machine was built. It is

@@ -138,3 +138,17 @@ quattro versions and assume the shell already exists. The shell is set up by the
 installer. Converting a 3.x machine in place is therefore a desktop-layer reinstall over
 a live system, not an update — which is why the chosen approach is to build a fresh
 quattro elsewhere, port the rice onto it, and cut over.
+
+> **Wrong, corrected 2026-08-09.** `bin/omarchy-upgrade-to-quattro` exists — 2,444
+> self-contained lines, explicitly written to be shipped in 3.8.x or run with
+> `curl | bash` on older systems. Searching the migrations was the wrong place to look,
+> and "confirmed by absence" was too strong a claim for a search that never covered
+> `bin/`. It has since been run end to end against the lab's CachyOS base and the
+> result is a working quattro desktop; see ADR-0035. The fresh-install-elsewhere
+> approach was still the right call — it is what made testing this safe — but it is
+> no longer the only path.
+
+**Quattro is package-backed, not a checkout.** The upgrade installs `omarchy` and
+`omarchy-settings` from `pkgs.omarchy.org` into `/usr/share/omarchy`, replacing the
+`~/.local/share/omarchy` git checkout that ADR-0001 and `loaf doctor` are built around.
+That is the structural change ADR-0035 has to absorb, and it is bigger than the bar.
