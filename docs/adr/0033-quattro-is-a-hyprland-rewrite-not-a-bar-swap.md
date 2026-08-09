@@ -152,3 +152,35 @@ quattro elsewhere, port the rice onto it, and cut over.
 `omarchy-settings` from `pkgs.omarchy.org` into `/usr/share/omarchy`, replacing the
 `~/.local/share/omarchy` git checkout that ADR-0001 and `loaf doctor` are built around.
 That is the structural change ADR-0035 has to absorb, and it is bigger than the bar.
+
+## Addendum: the Delete bucket is done, 2026-08-09
+
+Twelve tracked config files were removed — every one belonging to a package the
+upgrade uninstalled:
+
+    .config/waybar/{config.jsonc,style.css,theme-override.css}
+    .config/walker/{config.toml,themes/omarchy-custom/{layout.xml,style.css}}
+    .config/elephant/{calc,desktopapplications,symbols,websearch}.toml
+    .config/elephant/menus/palette.lua
+    .config/wiremix/wiremix.toml
+
+Measured before removing, not assumed: `pacman -Qq` matches none of `waybar`,
+`omarchy-walker`, `elephant`, `wiremix`; none of the four `~/.config` directories
+exist, so no live symlink pointed at any of them and Stow had nothing to unlink;
+and `theme-set.d/`, which generated `theme-override.css` for ADR-0009, is absent
+from both `~/.config/omarchy` and `/usr/share/omarchy`. The upgrade script does
+`rm -rf "$HOME/.config/elephant" … "$HOME/.config/wiremix"` itself, so this is
+upstream's intent rather than local drift.
+
+**Two of these are also the specification for the Port bucket** and must be read
+before it is attempted, not merely remembered as deleted: `config.jsonc` carries
+the bar's module list and order (ADR-0029, and the `custom/{ratio,weather,
+tailscale,calendar}` modules of ADR-0013/0026, 0031, 0006), and `palette.lua`
+carries the merged list's entry inventory (ADR-0027). Both are at tag
+`omarchy-v3.8.4-prequattro`:
+
+    git show omarchy-v3.8.4-prequattro:.config/waybar/config.jsonc
+    git show omarchy-v3.8.4-prequattro:.config/elephant/menus/palette.lua
+
+This removes 12 of the 31 not-installed symlinks `loaf doctor` reports. The rest
+are the Port and Re-decide buckets and are still genuinely missing.
