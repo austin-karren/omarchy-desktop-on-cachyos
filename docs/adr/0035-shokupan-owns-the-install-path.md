@@ -207,6 +207,13 @@ and demands `OMARCHY_ALLOW_DIRECT_PACMAN=1`. `~/.local/bin/system-update` calls
 `pacman -Syu` directly (ADR-0034) and will break the day this machine moves; it
 needs that variable or Omarchy's own updater.
 
+Confirmed on the upgraded machine, 2026-08-09: `/usr/share/libalpm/hooks/00-omarchy-update-guard.hook`
+is a `PreTransaction` hook with `AbortOnFail`, running `/usr/bin/omarchy-update-pacman-guard`,
+which exits early on either `OMARCHY_ALLOW_DIRECT_PACMAN=1` or `OMARCHY_UPDATE_PACMAN=1`
+(the latter is what `omarchy-update-system-pkgs` sets for itself). `system-update` already
+sets the former, so it survived the move — but the variable is load-bearing now rather
+than a precaution.
+
 **Loose ends, recorded rather than resolved:**
 
 - The upgrade installed `omarchy-dev` / `omarchy-settings-dev 4.0.0` even on the
@@ -225,6 +232,18 @@ needs that variable or Omarchy's own updater.
 - The bridge's nine dirty patches in `~/.local/share/omarchy` are not carried
   forward. They are captured as a diff in `~/snapshots/pre-omarchy-update-*`.
 - `loaf doctor`'s base checks are versioned against Omarchy like everything else.
-  The `wifi backend` check is already known-stale for quattro.
+  All four have now been settled (ADR-0034): `bridge patch`, `stale clone` and
+  `walker hold` deleted, `wifi backend` rewritten to assert that the configured
+  backend is *installed*, and a new `mirrorlist` check guarding the frozen-mirror
+  root cause above.
+- The `wifi backend` check earned its rewrite by being measurably wrong rather than
+  merely stale. `iwd` was not just disabled by quattro — it was **removed**
+  (`/var/log/pacman.log`, `pacman -Rns` at 2026-08-09 09:33:43, alongside `waybar`,
+  `walker`, `elephant`, `swaybg` and `wiremix`). `wifi.backend=iwd` stayed in
+  `NetworkManager.conf`, so NetworkManager has no backend: `wlp192s0` reports
+  `unavailable` and `nmcli d wifi list` returns nothing, on unblocked hardware. It
+  went unnoticed because this machine lives on ethernet, and doctor reported ✓
+  throughout. **Still unresolved** — the choice between dropping the stanza and
+  reinstalling `iwd` is a decision, not a repair, so doctor reports it and stops.
 - Anyone installing from this repo gets Shokupan's path, not the bridge's — which
   means the repo now owes them one that works.

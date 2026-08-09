@@ -17,6 +17,11 @@ Two consequences follow, and both need enforcing rather than remembering.
 
 ## Updating the base and updating the desktop are separate operations
 
+**Superseded by the section after this one, 2026-08-09.** Under quattro the desktop *is*
+base packages, so this separation is no longer purchasable. What follows is the reasoning
+as it stood on 3.8.4, kept because the two commands survive for a different reason and
+that reason only makes sense against this one.
+
 Omarchy does not offer that separation. `omarchy update` runs, in order:
 
     omarchy-snapshot create
@@ -46,6 +51,47 @@ on a bridged install the pacman prompts are where replacements and `.pacnew` war
 appear, and those are the early warning that an update is about to overwrite something
 the bridge put in `/etc`.
 
+## Under quattro the axis is interactive vs unattended, 2026-08-09
+
+Measured on the upgraded machine. **`omarchy-update-git` does not exist any more.** The
+pipeline in `/usr/share/omarchy/bin/omarchy-update` is:
+
+    omarchy-update-keyring
+    omarchy-update-system-pkgs     # sudo env OMARCHY_UPDATE_PACMAN=1 pacman -Syu --noconfirm --overwrite ...
+    omarchy-migrate
+    omarchy-hook post-update
+    omarchy-update-aur-pkgs        # yay -Sua --noconfirm
+    omarchy-update-mise
+    omarchy-update-orphan-pkgs
+    omarchy-update-restart
+
+Omarchy is no longer *pulled*. It is upgraded **by** `pacman -Syu`, because
+`omarchy-dev` and `omarchy-settings-dev` are ordinary packages from the `[omarchy]` repo
+(ADR-0035). So both rows of the table above are now false: "Update Omarchy Desktop" is a
+full unattended system upgrade, and "Update System … never touches Omarchy" is impossible
+— `pacman -Syu` upgrades `omarchy-dev` like anything else.
+
+The attribution this ADR was buying cannot be bought. You cannot update the desktop
+without updating the base, because the desktop *is* base packages.
+
+Both commands still deserve to exist, but the axis has rotated:
+
+| | `system-update` | `omarchy update` |
+|---|---|---|
+| pacman | **interactive** — replacements and `.pacnew` warnings visible | `--noconfirm`, plus 25 `--overwrite` paths |
+| migrations / hooks | no — calls `loaf heal` directly | `omarchy-migrate`, `omarchy-hook post-update` |
+| snapshot | no | `omarchy-snapshot create` |
+
+That `--overwrite` list is the sharpest argument for keeping `system-update`. It silently
+overwrites 25 files under `/etc`, including `sddm.conf.d`, `sudoers.d`,
+`mkinitcpio.conf.d` and `systemd/*.conf.d` — precisely the class of change this ADR wants
+a human watching, and precisely what `--noconfirm` hides.
+
+Quattro also installs a `PreTransaction` pacman hook, `00-omarchy-update-guard.hook`,
+with `AbortOnFail`: a direct `pacman -Syu` is refused unless `OMARCHY_ALLOW_DIRECT_PACMAN=1`
+or `OMARCHY_UPDATE_PACMAN=1` is set. `system-update` sets the former, so it is now
+load-bearing rather than forward-looking.
+
 ## `omarchy-channel-set` must never run on this machine
 
 This is the one command that would actually destroy the base. `omarchy-channel-set`
@@ -70,21 +116,40 @@ at index 14, so a same-named script here is never reached. The guard is therefor
 detective, in `loaf doctor`:
 
 - `repos` — fails if `/etc/pacman.conf` has no `[cachyos*]` section
-- `walker hold` — warns if `IgnorePkg = walker` is gone (CachyOS ships its own walker,
-  which would otherwise replace Omarchy's)
-- `wifi backend` — warns if `wifi.backend=iwd` is gone from NetworkManager
+- `mirrorlist` — fails if `/etc/pacman.d/mirrorlist` points at an Omarchy mirror
+- `wifi backend` — fails if NetworkManager's `wifi.backend` names a backend that is not
+  installed
 - `kernel` — warns if the running kernel is not a CachyOS one
 
-The last three are bridge side effects that live in `/etc` rather than in Omarchy's
-checkout, so the existing `cachyos patch` check cannot see them.
+These live in `/etc` rather than in Omarchy's own files, which is why the `cachyos patch`
+check could never see them.
+
+**Revised 2026-08-09.** As first written, the last three asserted *bridge side effects*
+rather than truths about CachyOS, and two expired the moment the bridge did (ADR-0035).
+`walker hold` is gone — quattro ships no Walker for an `IgnorePkg` to protect. `wifi
+backend` is rewritten: it warned when `wifi.backend=iwd` was *missing*, and so went on
+reporting ✓ after quattro removed `iwd` while the stanza naming it stayed behind — a green
+tick on a NetworkManager with no backend at all. Inverting it would have swapped one
+imported preference for another, so it now asserts the invariant that survives either
+resolution: the configured backend exists.
+
+`mirrorlist` is new, and takes the freed slot. ADR-0035 measured Omarchy's frozen Arch
+mirror as the root cause of the entire aquamarine failure, and nothing was watching for
+it. `[cachyos*]` surviving in `pacman.conf` does not imply the mirrorlist survived: the
+upgrade's `pacman.conf` edit is a surgical `awk`, while the mirrorlist is replaced whole.
+
+The pattern is the point. An expired check is worse than a missing one — it reports health
+it cannot see.
 
 ## Consequences
 
-- The rice's releases are tagged against the Omarchy they were verified on
-  (`omarchy-vX.Y.Z`), and lag upstream deliberately. `loaf doctor` reports the drift.
+- The rice records the Omarchy it was verified against in `packages/omarchy.pin`, and lags
+  upstream deliberately. `loaf doctor` reports the drift. (Originally a `omarchy-vX.Y.Z`
+  tag; see the README for why that stopped working under package versions.)
 - A desktop-only update can leave the machine half-updated if a new Omarchy expects a
-  package that is not installed — quattro needs Quickshell, for instance. The fix is
-  running `system-update` afterwards, which installs from the CachyOS repos. The
-  separation buys attribution, not independence.
+  package that is not installed — quattro needs Quickshell, for instance. Under
+  package-backing this mostly resolves itself, because the dependency is a package
+  dependency and pacman pulls it.
 - Anyone using this repo — a person or an agent — should read `omarchy update` as
-  "update everything", and `omarchy-channel-set` as "destroy the base".
+  "update everything, unattended", `system-update` as "update everything, watching", and
+  `omarchy-channel-set` as "destroy the base".
