@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Quattro is a Hyprland rewrite, not a bar swap
@@ -228,3 +228,44 @@ hover-reveal by configuration; it has no visibility setting and only the
 package's own `indicators/` directory feeds the hover group. Matching the ratio
 treatment would mean a second custom QML module that re-implements its chip and
 loses its popup, which is a real trade rather than an oversight.
+
+## Addendum: field notes from the executed port, 2026-08-09
+
+The port this ADR specified is done — every disposition in the table above was
+executed or corrected the same day (corrections annotated inline). These are the
+traps the work surfaced, moved here from the working document so they survive it:
+
+Traps found the hard way (first ones recorded in ADR-0013):
+
+- Quickshell runs module commands through `bash -lc`, which has **no
+  `~/.local/bin` on `PATH`**. A module whose `exec` is not found renders as an
+  empty box with no error anywhere. Use absolute paths until `.config/uwsm/env`
+  is re-decided. **The same trap holds for Omarchy Menu actions**
+  (`Quickshell.execDetached`, and the floating-terminal presentation): every
+  rice-owned command in `extensions/omarchy-menu.jsonc` carries an absolute path,
+  measured by `update.system` failing with "command not found" inside an
+  otherwise-working terminal.
+- The shell's `FileView` watch on `extensions/omarchy-menu.jsonc` goes **stale
+  when the file's inode is replaced** (rm + ln, stow re-stow): the old content
+  stays live with no error. The symlink itself is fine — verified by summoning a
+  rice-only submenu through it. After swapping the file, run `omarchy-menu
+  refresh` (or any shell restart) and re-check.
+- `loaf doctor` tests each tracked path with `[[ -L ]]`, so a **directory**
+  symlink makes every file under it read as "replaced by a real file". Link
+  files individually.
+- The shell registers **new** files in `bar/modules/` only at startup. Layout
+  edits hot-reload, and edits to an already-registered module hot-reload, but a
+  freshly added `.qml` file renders nothing until `omarchy-restart-shell` — with
+  no error, because quickshell's stdout and stderr both point at `/dev/null`.
+  Cost three "failed" implementations before it was identified.
+- **`hyprctl dispatch` changed languages.** With `configProvider: lua`, the
+  classic `hyprctl dispatch movetoworkspacesilent …` form is parsed as Lua and
+  fails; dispatchers are `hl.dsp.*` calls now, e.g.
+  `hyprctl dispatch 'hl.dsp.workspace.toggle_special("calendar")'` and
+  `hl.dsp.window.move({ workspace = …, window = "address:…", silent = true })`.
+  `calendar-toggle` is converted and verified end to end. **`float-snap`,
+  `close-surface`, `window-resize` and `window-toggle` still carry the old
+  syntax** and are broken until converted — their keybindings are dead anyway,
+  so they belong to the `bindings.conf` → `.lua` port, not the bar.
+- QML string literals do not understand `\U000FXXXX`; supplementary-plane Nerd
+  Font glyphs must be embedded as literal characters (or `\u{F00ED}`).
