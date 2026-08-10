@@ -51,6 +51,45 @@ on a bridged install the pacman prompts are where replacements and `.pacnew` war
 appear, and those are the early warning that an update is about to overwrite something
 the bridge put in `/etc`.
 
+## The ownership ladder, 2026-08-10
+
+The user's stance, near-verbatim: *the previous approach was scared to take
+ownership over Omarchy. We can take Omarchy and take ownership over it, as long
+as it stays compatible with future updates.*
+
+"Omarchy is clay" was always the claim; the pre-quattro reality was more timid,
+and partly for good reason — the checkout era made ownership genuinely hostile
+(PATH order meant a same-named script never won; edits inside Omarchy's tree
+vanished on `git pull`; ADR-0026 fought its value war with a poll-and-repair
+loop because nothing better existed). Quattro changed the terms: config is Lua
+that composes, the shell takes user plugins and QML modules, and the package
+boundary makes "theirs" unambiguous. Ownership is now taken at whichever rung
+does the job, and **update-compatibility is the admission test** for every
+rung — never edit a file the omarchy package owns; the next upgrade reverts it
+and doctor cannot even see it happened.
+
+1. **Our value, their mechanism** — declare the deviation in a file we track,
+   let upstream's machinery apply it. The zen ratio is the type specimen: 6:5
+   lives in our `hyprland.lua`, gated on upstream's own flag file; the toggle
+   is a straight delegation to `omarchy-hyprland-toggle`.
+2. **Sanctioned extension points** — hooks, `extensions/omarchy-menu.jsonc`,
+   `themed/*.tpl`, `bar/modules/*.qml`. Upstream declares the surface; we fill
+   it. Costs a re-diff when upstream moves the surface.
+3. **Hosted wrappers** — load an upstream component whole and adjust it from
+   outside (`microphone.qml`, `audio.qml`). Upstream still ships every update
+   into the wrapped part; the wrapper carries only the delta. Fragile exactly
+   at the seams it reaches through, so each wrapper documents its crawl.
+4. **Fork as overlay** — take the whole component and carry it
+   (`plugins/shokupan-launcher/`, upstream's launcher forked). Full control,
+   full re-diff burden after every upstream release. The rung of last resort,
+   and the proof it is climbable.
+
+Climb the ladder no higher than the change needs, but climb it without
+apology — the lower rungs are preferred for their update cost, not out of
+deference. What is *never* acceptable is rung zero: patching Omarchy's own
+files in place, which is the bridge's old model and fails the admission test
+by construction.
+
 ## Under quattro the axis is interactive vs unattended, 2026-08-09
 
 Measured on the upgraded machine. **`omarchy-update-git` does not exist any more.** The
