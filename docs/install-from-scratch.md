@@ -11,10 +11,19 @@ Three layers, bottom to top. **CachyOS is the base** — kernel, znver4 repos,
 bootloader, snapper — and it is not Omarchy's to manage (ADR-0034). **Omarchy is
 the desktop**, installed as ordinary distro packages (`omarchy-dev`,
 `omarchy-settings-dev`) from the `[omarchy]` repo, not from Omarchy's own ISO
-(ADR-0035). **Shokupan (this repo) is the rice** — the deliberate deviations from
-a stock Omarchy install, stowed on top and kept in sync by `loaf`. Each layer is
-installed by a different mechanism, and section 4 below exists because one of
-those mechanisms reaches into a layer it does not own.
+(ADR-0035). **`dotfiles-arch` is the rice** — the deliberate deviations from
+a stock Omarchy install, stowed on top and kept in sync by `loaf`. It carries
+`loaf` itself, the package manifests, and the test suite. A fourth piece,
+**`shokupan`**, holds the Quickshell plugins and the Tokyo Night bar override;
+it is fetched and linked by `loaf plugins` rather than stowed, because it is
+publishable on its own and upstream's `omarchy plugin add` is the consumption
+path for exactly that shape. Each layer is installed by a different mechanism,
+and section 4 below exists because one of those mechanisms reaches into a layer
+it does not own.
+
+> The three repos were split apart on 2026-08-18. If you are reading an older
+> copy of this guide that tells you to clone `shokupan` and run `loaf-install`
+> from it, that is the pre-split layout — `loaf` lives in `dotfiles-arch` now.
 
 ## 2. CachyOS installer choices that matter
 
@@ -33,6 +42,14 @@ see "Unverified" below.
   Omarchy's hooks file assumes a different unlock mechanism than the CachyOS
   installer's cmdline provides. See section 4; do not skip it because
   encryption "worked" on first boot.
+
+  If you are building a **VM or test base** rather than a daily machine, choose
+  encryption anyway. Section 4's guard only engages when root is actually on
+  LUKS, so an unencrypted base silently cannot exercise the one failure this
+  whole document exists to prevent — every check reports "not applicable" and
+  passes vacuously. The 2026-08-18 lab base was built without encryption and
+  was useless for exactly this reason
+  (`docs/vm-validation-2026-08-18.md`).
 - **Limine bootloader — recommended.** ADR-0047's guard (the
   `cryptdevice=` drop-in) is a `/etc/limine-entry-tool.d/` fragment, and this
   machine's snapshot-boot story runs through `limine-snapper-sync`
@@ -128,15 +145,20 @@ and `/proc/cmdline`.
 
 ## 5. Installing the rice
 
-With CachyOS and Omarchy both in place, clone the repo and run the installer
+With CachyOS and Omarchy both in place, clone the rice and run the installer
 (`.local/bin/loaf-install`):
 
 ```bash
 cd ~
-gh repo clone austin-karren/shokupan
-cd shokupan
+git clone https://github.com/austin-karren/dotfiles-arch.git
+cd dotfiles-arch
 .local/bin/loaf-install
 ```
+
+`git` is on a stock CachyOS base; `gh` is not, and nothing in
+`packages/chosen.packages` installs it — so use `git clone` here, not
+`gh repo clone`. You do not need to clone `shokupan` yourself: step 4b below
+fetches it.
 
 In order, it:
 
@@ -149,7 +171,15 @@ In order, it:
    version. A mismatch is a hard stop unless `--force` accepts the drift.
 3. **Runs the boot-contract step** described in section 4.
 4. **Installs chosen packages and flatpaks** from `packages/chosen.packages`
-   and `packages/chosen.flatpaks`.
+   and `packages/chosen.flatpaks`. This is also where `stow` arrives — a stock
+   CachyOS base has no `stow`, and step 5 cannot do anything without it.
+4b. **Fetches and links the plugins repo** (`loaf plugins`) — clones
+   `austin-karren/shokupan` to `~/.local/share/shokupan`, symlinks the
+   Quickshell plugins, bar modules, indicators, `bin/` helpers and theme-set
+   hooks into `~/.config/omarchy` and `~/.local/bin`, and *copies* (never
+   symlinks) the theme override, because `omarchy-theme-set` stages user themes
+   with `cp -r` and would leave a symlink dangling. Idempotent, and
+   `--offline` re-asserts the links without touching the network.
 5. **Runs `loaf heal`** — stows the rice, applies debloat, runs pending
    migrations. This is the same reconciliation pass the post-update hook runs
    after every `omarchy update`; installing from nothing is just healing from
@@ -161,8 +191,9 @@ In order, it:
 Every step is idempotent, so a failed run resumes by running `loaf-install`
 again.
 
-`loaf` defaults to `~/shokupan` (`LOAF_ROOT`); clone anywhere else and export
-that variable first.
+`loaf` defaults to `~/dotfiles-arch` (`LOAF_ROOT`); clone anywhere else and
+export that variable first. The plugins checkout is separate and defaults to
+`~/.local/share/shokupan` (`PLUGINS_ROOT`).
 
 Before `loaf doctor` reports clean, three machine-side identity files need
 creating — the README's "Required: git identity", "Required: compose
@@ -180,6 +211,12 @@ loaf doctor           # all three layers agree; read-only, no sudo
 bash test/loaf-test.sh
 ```
 
+`loaf doctor` **exits non-zero when it reports problems**, so it is usable in a
+script or a CI gate, not just as something to read. `test/loaf-test.sh` expects
+`stow` and `shellcheck` to be installed: without `stow` a dozen tests fail on a
+base that has not finished step 4, and the shellcheck test self-skips, which is
+why the count is 122 on a complete machine and 121 on one missing shellcheck.
+
 `loaf doctor` green means: CachyOS repos and mirrorlist intact, Omarchy at the
 pinned version (or an accepted `--force` drift), the boot contract's
 pre-detonation window closed, packages and flatpaks matching their manifests,
@@ -193,10 +230,22 @@ Boot-contract spot check, worth running once by hand after the first
 encrypted boot and again after any kernel upgrade:
 
 ```bash
-grep -qE '^HOOKS=.*[( ]encrypt[ )]' /etc/mkinitcpio.conf.d/omarchy_hooks.conf && \
-  grep -q 'cryptdevice=' /proc/cmdline && \
-  echo "cryptdevice= is live" || echo "check loaf doctor's boot-contract line"
+if ! grep -qE '^HOOKS=.*[( ]encrypt[ )]' /etc/mkinitcpio.conf.d/omarchy_hooks.conf 2>/dev/null; then
+  echo "n/a — hooks do not use the busybox encrypt flavour"
+elif ! grep -qE 'rd\.luks\.uuid=|root=/dev/mapper/' /proc/cmdline; then
+  echo "n/a — encrypt hook present, but root is not on LUKS"
+elif grep -q 'cryptdevice=' /proc/cmdline; then
+  echo "cryptdevice= is live"
+else
+  echo "DANGER: encrypt hook + LUKS root + no cryptdevice= — do not reboot"
+fi
 ```
+
+The three-way split matters. An earlier version of this check tested only the
+hook and `cryptdevice=`, so on a machine with the `encrypt` hook and an
+*unencrypted* root — a perfectly healthy state — it reported a problem and sent
+the reader off to investigate nothing. Only the last branch is the failure that
+strands the machine, and it is the only one that should alarm you.
 
 If `loaf doctor` ever reports the boot contract red, do **not** reboot before
 resolving it — follow the recovery runbook linked from ADR-0047.
