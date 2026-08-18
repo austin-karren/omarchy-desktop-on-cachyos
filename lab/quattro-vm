@@ -9,6 +9,7 @@
 # is ever symlinked into $HOME.
 #
 #   quattro-vm create    define the domain and boot the installer
+#   quattro-vm luks      define the ENCRYPTED domain and boot the installer
 #   quattro-vm view      attach a viewer to the console
 #   quattro-vm snapshot  save the base before layering Omarchy onto it
 #   quattro-vm reset     roll back to that snapshot
@@ -27,6 +28,18 @@ DISK_SIZE=${QUATTRO_VM_DISK:-60}
 RAM=${QUATTRO_VM_RAM:-8192}
 VCPUS=${QUATTRO_VM_VCPUS:-4}
 BASE_SNAPSHOT=base-cachyos
+
+# The encrypted lab base is a *separate* domain, not a mode of the one above.
+# ADR-0047 only engages when root is genuinely on LUKS, and encryption is an
+# install-time choice — there is no retrofit. See
+# docs/vm-validation-luks-2026-08-18.md.
+LUKS_NAME=${QUATTRO_VM_LUKS_NAME:-shokupan-luks-lab}
+LUKS_DISK="$IMAGES/${LUKS_NAME}.qcow2"
+LUKS_SSH_PORT=${QUATTRO_VM_LUKS_SSH_PORT:-2222}
+POOL=${QUATTRO_VM_POOL:-images}
+OVMF_CODE=${QUATTRO_VM_OVMF_CODE:-/usr/share/edk2/x64/OVMF_CODE.4m.fd}
+OVMF_VARS=${QUATTRO_VM_OVMF_VARS:-/usr/share/edk2/x64/OVMF_VARS.4m.fd}
+OVMF_VARS_QCOW2_NAME=ovmf-vars-4m.qcow2
 
 die() { printf '\e[31m%s\e[0m\n' "$1" >&2; exit 1; }
 step() { printf '\n\e[32m%s\e[0m\n' "$1"; }
@@ -147,6 +160,244 @@ Calamares with a UTF-8 locale — see 'quattro-vm calamares'.
 EOF
 }
 
+virsh_sys() { virsh -c qemu:///system "$@"; }
+
+cmd_luks() {
+  need virsh
+  need qemu-img
+  virsh_sys dominfo "$LUKS_NAME" &>/dev/null &&
+    die "Domain '$LUKS_NAME' already exists. Undefine it first, or set QUATTRO_VM_LUKS_NAME."
+
+  fetch_iso
+
+  # Everything below goes through libvirt rather than sudo. /var/lib/libvirt/images
+  # is root-owned, but libvirtd runs as root and will create volumes there on
+  # request, so the whole domain can be built by a member of the libvirt group.
+  step "Creating a ${DISK_SIZE}G disk in pool '$POOL'"
+  virsh_sys vol-create-as "$POOL" "${LUKS_NAME}.qcow2" "${DISK_SIZE}G" --format qcow2
+
+  # libvirt refuses internal snapshots on a pflash domain whose nvram is raw
+  # ("internal snapshots of a VM with pflash based firmware require QCOW2 nvram
+  # format"), and it will not convert a raw template on the fly either. So stage
+  # a qcow2 copy of OVMF_VARS where libvirtd can read it. Doing this means giving
+  # up firmware='efi' autoselection — libvirt rejects a non-standard template
+  # with "Unable to find 'efi' firmware that is compatible with the current
+  # configuration" — hence the explicit <loader>/<nvram> pair below.
+  if ! virsh_sys vol-info --pool "$POOL" "$OVMF_VARS_QCOW2_NAME" &>/dev/null; then
+    step "Staging a qcow2 OVMF_VARS template"
+    local tmp
+    tmp=$(mktemp -d)
+    qemu-img convert -f raw -O qcow2 "$OVMF_VARS" "$tmp/vars.qcow2"
+    virsh_sys vol-create-as "$POOL" "$OVMF_VARS_QCOW2_NAME" \
+      "$(stat -c%s "$OVMF_VARS")" --format qcow2 --allocation 0
+    virsh_sys vol-upload --pool "$POOL" "$OVMF_VARS_QCOW2_NAME" "$tmp/vars.qcow2"
+    rm -rf "$tmp"
+  fi
+
+  step "Defining $LUKS_NAME"
+  # host-passthrough and UEFI for the same reasons as the unencrypted lab base
+  # (see cmd_create). Two things differ:
+  #
+  # * The NIC is qemu user-mode (SLIRP), attached through <qemu:commandline>
+  #   because virt-install and libvirt's <interface type='user'/> will not give
+  #   us a hostfwd. SLIRP lives entirely inside qemu: no virbr0, no NAT rule, and
+  #   therefore nothing for the host's ufw to drop — which is the blocker
+  #   check_firewall exists to warn about, sidestepped rather than fixed.
+  #   The device needs an explicit free PCI address or it collides with the video
+  #   device libvirt places at pcie.0 slot 1, and the host-side hostfwd port must
+  #   stay clear of libvirt's VNC autoport range or the domain will not start.
+  #
+  # * <boot dev='cdrom'/> comes first so the ISO wins on the install boot; flip
+  #   it (or eject the media) before the first boot off the disk.
+  local xml
+  xml=$(mktemp)
+  cat >"$xml" <<EOF
+<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
+  <name>$LUKS_NAME</name>
+  <memory unit='MiB'>$RAM</memory>
+  <vcpu placement='static'>$VCPUS</vcpu>
+  <os>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <loader readonly='yes' type='pflash' format='raw'>$OVMF_CODE</loader>
+    <nvram template='$IMAGES/$OVMF_VARS_QCOW2_NAME' templateFormat='qcow2' format='qcow2'>/var/lib/libvirt/qemu/nvram/${LUKS_NAME}_VARS.qcow2</nvram>
+    <boot dev='cdrom'/>
+    <boot dev='hd'/>
+  </os>
+  <features><acpi/><apic/><vmport state='off'/></features>
+  <cpu mode='host-passthrough' check='none' migratable='on'/>
+  <clock offset='utc'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' discard='unmap'/>
+      <source file='$LUKS_DISK'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='$ISO'/>
+      <target dev='sda' bus='sata'/>
+      <readonly/>
+    </disk>
+    <controller type='sata' index='0'/>
+    <controller type='usb' index='0' model='qemu-xhci' ports='15'/>
+    <controller type='pci' index='0' model='pcie-root'/>
+    <controller type='pci' index='1' model='pcie-root-port'/>
+    <controller type='pci' index='2' model='pcie-root-port'/>
+    <controller type='pci' index='3' model='pcie-root-port'/>
+    <controller type='pci' index='4' model='pcie-root-port'/>
+    <serial type='pty'><target type='isa-serial' port='0'><model name='isa-serial'/></target></serial>
+    <console type='pty'><target type='serial' port='0'/></console>
+    <input type='tablet' bus='usb'/>
+    <input type='keyboard' bus='ps2'/>
+    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
+    <video><model type='virtio' heads='1' primary='yes'/></video>
+    <memballoon model='virtio'/>
+    <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>
+  </devices>
+  <qemu:commandline>
+    <qemu:arg value='-netdev'/>
+    <qemu:arg value='user,id=slirp0,hostfwd=tcp:127.0.0.1:${LUKS_SSH_PORT}-:22'/>
+    <qemu:arg value='-device'/>
+    <qemu:arg value='virtio-net-pci,netdev=slirp0,id=slirpnic0,bus=pcie.0,addr=0x1e'/>
+  </qemu:commandline>
+</domain>
+EOF
+  virsh_sys define "$xml"
+  rm -f "$xml"
+  virsh_sys start "$LUKS_NAME"
+
+  step "Done"
+  cat <<EOF
+$LUKS_NAME is booting the ISO. Calamares is not needed — 'quattro-vm luks-script'
+prints a scripted install that reproduces what Calamares would have written.
+
+Get a serial root shell on the live ISO:
+
+  1. Attach before the bootloader countdown expires (2s):
+       virsh -c qemu:///system console $LUKS_NAME --force
+     Driving it headlessly, start the domain and the console from one command so
+     nothing races the menu, and press an arrow key immediately to stop it.
+  2. OVMF puts the firmware and GRUB on the serial port, so the ISO's GRUB menu
+     is right there. Press 'e', append to the *linux* line:
+       console=ttyS0,115200 console=tty0
+     then Ctrl+X. GRUB's editor reports the cursor one screen line above where
+     it really is, so check before trusting End/Ctrl+E.
+  3. Log in as 'root', no password.
+
+Then get off the console — everything after this is easier over SSH:
+
+  # in the guest, over the serial console
+  mkdir -p /root/.ssh && echo '<your host public key>' > /root/.ssh/authorized_keys
+  chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && systemctl start sshd
+
+  # on the host
+  ssh -p $LUKS_SSH_PORT root@127.0.0.1 'curl -sI https://archlinux.org | head -1'
+
+That last check is the one worth doing before any package work: it proves the
+SLIRP egress is live without a host firewall rule.
+EOF
+}
+
+cmd_luks_script() {
+  # Printed rather than run: this executes inside the guest's live ISO.
+  #
+  # The kernel params are not invented. Calamares' bootloader module builds them
+  # in get_kernel_params(): kernelParams (quiet nowatchdog), splash when plymouth
+  # is installed, rw, rootflags=subvol=..., then — because initcpiocfg.conf sets
+  # useSystemdHook: true, giving HOOKS a `systemd` — rd.luks.uuid=<luksUuid> and
+  # root=/dev/mapper/<luksMapperName>. That sd-encrypt-flavoured cmdline against
+  # Omarchy's busybox `encrypt` hook is the whole of ADR-0047.
+  cat <<'EOF'
+Run this INSIDE the guest's live ISO (over SSH, not the console), after
+adjusting PASS/USER to taste. It reproduces the CachyOS installer's shape:
+LUKS root, btrfs subvolumes, a vfat ESP at /boot (not /boot/efi), limine on
+UEFI, and an rd.luks.uuid= cmdline with no cryptdevice=.
+
+  set -euo pipefail
+  DISK=/dev/vda; PASS=labluks; USER=austin; USERPASS=labpass
+
+  sgdisk --zap-all "$DISK"
+  sgdisk -n1:0:+1G -t1:ef00 -c1:"EFI system partition" "$DISK"
+  sgdisk -n2:0:0   -t2:8309 -c2:"cachyos"             "$DISK"
+  partprobe "$DISK"; sleep 2
+
+  printf '%s' "$PASS" | cryptsetup luksFormat --type luks2 --batch-mode "${DISK}2" -
+  LUKS_UUID=$(blkid -s UUID -o value "${DISK}2"); MAPPER="luks-${LUKS_UUID}"
+  printf '%s' "$PASS" | cryptsetup open "${DISK}2" "$MAPPER" -
+
+  mkfs.fat -F32 -n CACHYBOOT "${DISK}1"
+  mkfs.btrfs -f -L cachyos "/dev/mapper/$MAPPER"
+  mount "/dev/mapper/$MAPPER" /mnt
+  for sv in @ @home @root @srv @cache @tmp @log; do btrfs subvolume create "/mnt/$sv"; done
+  umount /mnt
+
+  M="noatime,compress=zstd,space_cache=v2"
+  mount -o "$M,subvol=@" "/dev/mapper/$MAPPER" /mnt
+  mkdir -p /mnt/{home,root,srv,boot,var/cache,var/tmp,var/log}
+  mount -o "$M,subvol=@home"  "/dev/mapper/$MAPPER" /mnt/home
+  mount -o "$M,subvol=@root"  "/dev/mapper/$MAPPER" /mnt/root
+  mount -o "$M,subvol=@srv"   "/dev/mapper/$MAPPER" /mnt/srv
+  mount -o "$M,subvol=@cache" "/dev/mapper/$MAPPER" /mnt/var/cache
+  mount -o "$M,subvol=@tmp"   "/dev/mapper/$MAPPER" /mnt/var/tmp
+  mount -o "$M,subvol=@log"   "/dev/mapper/$MAPPER" /mnt/var/log
+  mount "${DISK}1" /mnt/boot
+
+  pacstrap -K /mnt base base-devel linux-cachyos linux-cachyos-headers \
+    linux-firmware amd-ucode btrfs-progs cryptsetup mkinitcpio dosfstools \
+    limine limine-entry-tool limine-mkinitcpio-hook limine-snapper-sync snapper \
+    efibootmgr plymouth networkmanager openssh sudo git vim which pacman-contrib
+  genfstab -U /mnt >> /mnt/etc/fstab
+
+  # sd-encrypt half: what Calamares' initcpiocfg writes with useSystemdHook: true.
+  cat > /mnt/etc/mkinitcpio.conf.d/00-base.conf <<'HOOKS'
+  HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems fsck)
+HOOKS
+
+  # console= is a lab addition: without it there is no way to type the LUKS
+  # passphrase headlessly, and no way to watch a failed boot.
+  cat > /mnt/etc/default/limine <<LIMINE
+  ESP_PATH="/boot"
+  KERNEL_CMDLINE[default]+="quiet nowatchdog splash rw rootflags=subvol=/@ rd.luks.uuid=${LUKS_UUID} root=/dev/mapper/${MAPPER} console=tty0 console=ttyS0,115200"
+  BOOT_ORDER="*, *lts, *fallback, Snapshots"
+LIMINE
+
+  arch-chroot /mnt bash -c '
+    ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+    sed -i "s/^#en_US.UTF-8/en_US.UTF-8/" /etc/locale.gen && locale-gen
+    echo LANG=en_US.UTF-8 > /etc/locale.conf; echo KEYMAP=us > /etc/vconsole.conf
+    mkinitcpio -P
+    limine-install || limine-install --skip-uefi --fallback
+    limine-update
+    systemctl enable NetworkManager sshd
+  '
+
+Afterwards, still in the live ISO:
+
+  * Create the user, set passwords, drop /etc/sudoers.d/10-lab-nopasswd, and
+    install your host public key for both root and the user. You are building
+    the guest, so the credential is yours to choose — that is the whole answer
+    to "the lab image has no known sudo password".
+  * The CachyOS repos are NOT in the target: pacstrap uses the live ISO's
+    pacman.conf for the transaction and installs a stock Arch one. Add them from
+    inside the booted guest with upstream's own script:
+      curl -fsSL https://mirror.cachyos.org/cachyos-repo.tar.xz | tar xJ
+      cd cachyos-repo && sudo ./cachyos-repo.sh --install
+  * Flip the domain to <boot dev='hd'/> first and eject the ISO, then snapshot
+    the result before layering anything.
+
+DO NOT skip the egress check before pacstrap. Guest networking that half-works
+looks identical to a slow mirror for about ten minutes.
+EOF
+}
+
 cmd_calamares() {
   # Calamares' pacstrap module decodes pacman's output with the ASCII codec when
   # the environment has no UTF-8 locale, so the first non-ASCII byte pacman emits
@@ -233,6 +484,8 @@ cmd_destroy() {
 
 case "${1:-}" in
   create) cmd_create ;;
+  luks) cmd_luks ;;
+  luks-script) cmd_luks_script ;;
   view) cmd_view ;;
   snapshot) cmd_snapshot ;;
   reset) cmd_reset ;;
@@ -241,9 +494,13 @@ case "${1:-}" in
   recover) cmd_recover ;;
   *)
     cat >&2 <<EOF
-Usage: quattro-vm {create|view|snapshot|reset|destroy|calamares|recover}
+Usage: quattro-vm {create|luks|luks-script|view|snapshot|reset|destroy|calamares|recover}
 
   create     fetch and verify the CachyOS ISO, define '$NAME', boot the installer
+  luks       define '$LUKS_NAME', an ENCRYPTED base — the only kind that can
+             exercise ADR-0047. Separate domain, user-mode networking, serial
+             console; needs no sudo and no host firewall rule
+  luks-script  print the scripted LUKS install to run inside that guest's ISO
   view       attach virt-viewer to the console
   snapshot   save the clean base as '$BASE_SNAPSHOT'
   reset      revert to that snapshot
