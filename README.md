@@ -46,5 +46,8 @@ checks and a drop-in rather than by patching an installer.
 
 Extracted 2026-08-18 from a working machine that has been running this way since
 2026-05, through the 3.8.x → quattro (4.0) migration and the r1046 → r1744
-upgrade. The install path is documented and guarded; a from-blank-disk VM run is
-the next validation.
+upgrade. The install path is documented and guarded, and ADR-0047's guard has
+now been watched to hold *and* to fail on a from-blank-disk LUKS VM
+([`docs/vm-validation-luks-2026-08-18.md`](docs/vm-validation-luks-2026-08-18.md)).
+That run also found that layering Omarchy as packages leaves a fresh machine
+well short of this one — see §3 of the install guide.
