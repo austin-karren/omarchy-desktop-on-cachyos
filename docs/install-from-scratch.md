@@ -217,6 +217,12 @@ script or a CI gate, not just as something to read. `test/loaf-test.sh` expects
 base that has not finished step 4, and the shellcheck test self-skips, which is
 why the count is 122 on a complete machine and 121 on one missing shellcheck.
 
+**Following this guide gets you 121, not 122.** `stow` arrives with step 4, but
+`shellcheck` is not in `packages/chosen.packages` and nothing else installs it,
+so the shellcheck test self-skips on a machine built exactly as described here
+(measured in the lab, 2026-08-18). `sudo pacman -S --needed shellcheck` first if
+you want the full count; 121 with a `# skip` line is a pass, not a failure.
+
 `loaf doctor` green means: CachyOS repos and mirrorlist intact, Omarchy at the
 pinned version (or an accepted `--force` drift), the boot contract's
 pre-detonation window closed, packages and flatpaks matching their manifests,

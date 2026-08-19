@@ -174,6 +174,105 @@ Notes for driving it without a human:
 EOF
 }
 
+cmd_encrypted() {
+  # An unencrypted base cannot exercise ADR-0047 at all: the boot-contract guard
+  # takes its not-applicable branch and every check passes vacuously
+  # (docs/vm-validation-2026-08-18.md). Building a fresh encrypted base means
+  # Calamares, which is interactive. This is the other route — retrofit LUKS onto
+  # a base that already carries the Omarchy version you want to upgrade *from*,
+  # which is the only way to keep an old Omarchy that upstream no longer serves.
+  #
+  # Used to build the substrate for docs/vm-upgrade-path-2026-08-18.md.
+  #
+  # Print rather than run: most of this executes inside the guest's live ISO.
+  cat <<'EOF'
+Retrofitting LUKS onto an existing lab disk, to get a base that can actually
+detonate ADR-0047. Take a copy first — never do this to a snapshot you want back.
+
+1. Copy the disk without stopping the domain that owns it. `vol-clone` fails
+   ("Failed to get shared write lock") and uses qemu-img convert, which drops the
+   internal snapshots. Suspend, stream it out, resume — a few seconds:
+
+       virsh -c qemu:///system suspend <src-domain>
+       virsh -c qemu:///system vol-download --pool images <src>.qcow2 /tmp/base.qcow2
+       virsh -c qemu:///system resume <src-domain>
+       qemu-img snapshot -a <the-snapshot-you-want> /tmp/base.qcow2
+       virsh -c qemu:///system vol-create-as images <new>.qcow2 60G --format qcow2
+       virsh -c qemu:///system vol-upload --pool images <new>.qcow2 /tmp/base.qcow2
+
+2. Define your own domain on it. Two things the copied XML needs changing:
+
+   * Internal snapshots refuse to work with raw pflash NVRAM
+     ("internal snapshots of a VM with pflash based firmware require QCOW2 nvram
+     format"). Convert OVMF_VARS to qcow2, upload it as a volume, and point
+     <nvram> at it — then drop os firmware='efi' and the <firmware> block, or
+     libvirt cannot match a descriptor and refuses to define the domain.
+   * Add a second NIC using qemu user-mode networking for egress:
+
+         <interface type='user'><model type='virtio'/></interface>
+
+     It bypasses the host ufw rules entirely (see check_firewall above), and the
+     guest prefers its lower-metric default route while the bridge NIC keeps
+     host-to-guest SSH working. No host root needed.
+
+3. Boot the CachyOS ISO in it. root has an empty password and sshd allows root,
+   but PermitEmptyPasswords is off, so bootstrap a shell through the desktop:
+   Alt+F2 (krunner), "konsole", then
+
+       echo 'root:<pw>' | sudo chpasswd && sudo systemctl restart sshd
+
+   liveuser is in wheel with NOPASSWD, so no password is needed for that. Drive
+   the keystrokes with `virsh send-key`; everything after is SSH.
+
+4. Encrypt the root partition in place. btrfs must shrink first to make room for
+   the LUKS2 header:
+
+       mount /dev/vda2 /mnt/top && btrfs filesystem resize -32M /mnt/top
+       umount /mnt/top
+       cryptsetup reencrypt --encrypt --type luks2 --reduce-device-size 32M \
+         --pbkdf pbkdf2 --pbkdf-force-iterations 1000 --resilience none \
+         --batch-mode --key-file /tmp/pw /dev/vda2
+
+   56 GiB took about 70 seconds. /etc/fstab needs no edit: the btrfs UUID lives
+   inside the filesystem and does not change.
+
+5. Put the boot config into the dialect the CachyOS installer emits, which is
+   what makes the base faithful rather than merely encrypted. Verified against
+   the ISO's own Calamares (usr/lib/calamares/modules/bootloader/main.py and
+   initcpiocfg/main.py): systemd + sd-encrypt hooks, and
+
+       rd.luks.uuid=<luks-uuid> root=/dev/mapper/luks-<luks-uuid>
+
+   in KERNEL_CMDLINE[default] in /etc/default/limine. Add sd-encrypt to HOOKS in
+   /etc/mkinitcpio.conf (the base file, not Omarchy's drop-in).
+
+6. Build the initramfs with Omarchy's hooks file moved ASIDE, then put it back:
+
+       mv /etc/mkinitcpio.conf.d/omarchy_hooks.conf /tmp/hold
+       limine-update
+       mv /tmp/hold /etc/mkinitcpio.conf.d/omarchy_hooks.conf
+
+   That is what reproduces the pre-detonation window: hooks on disk say encrypt,
+   the cmdline says rd.luks.uuid=, and the running image still says sd-encrypt,
+   so the machine boots. Skip the move and you build the broken image
+   immediately, and the very next boot is the emergency shell.
+
+7. Expect the first limine-update after Omarchy is layered to strand the boot
+   menu: it creates a new "Omarchy" OS entry from omarchy-defaults.conf's
+   TARGET_OS_NAME, abandons the installer's "CachyOS" one, and UKI generation
+   deletes the kernel files that abandoned entry still points at. Clear it with
+
+       limine-remove-entry CachyOS 1
+
+   and set default_entry to the surviving entry, or every boot panics on a
+   missing vmlinuz.
+
+Verify you got it right — on a machine that still boots, this must say DANGER:
+
+    loaf doctor | grep 'boot contract'
+EOF
+}
+
 cmd_recover() {
   # Two things reliably wedge a retry after a failed install, and neither error
   # message points at the cause.
@@ -238,10 +337,11 @@ case "${1:-}" in
   reset) cmd_reset ;;
   destroy) cmd_destroy ;;
   calamares) cmd_calamares ;;
+  encrypted) cmd_encrypted ;;
   recover) cmd_recover ;;
   *)
     cat >&2 <<EOF
-Usage: quattro-vm {create|view|snapshot|reset|destroy|calamares|recover}
+Usage: quattro-vm {create|view|snapshot|reset|destroy|calamares|encrypted|recover}
 
   create     fetch and verify the CachyOS ISO, define '$NAME', boot the installer
   view       attach virt-viewer to the console
@@ -249,6 +349,7 @@ Usage: quattro-vm {create|view|snapshot|reset|destroy|calamares|recover}
   reset      revert to that snapshot
   destroy    undefine the domain and delete its disk
   calamares  how to launch the installer headlessly without it dying on locale
+  encrypted  how to retrofit LUKS onto a lab disk so ADR-0047 can actually fire
   recover    what to do after a failed install wedges the disk or the boot order
 EOF
     exit 1
